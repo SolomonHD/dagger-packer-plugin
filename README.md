@@ -29,6 +29,13 @@ dagger install github.com/SolomonHD/dagger-packer-plugin@v1.0.0
 Build a plugin and install it in one command:
 
 ```bash
+# Simplest form - auto-detects git-source from go.mod and version from VERSION file
+dagger call -m dagger-packer-plugin build-and-install \
+  --source=./packer-plugin-docker \
+  --use-version-file \
+  export --path=.
+
+# With explicit git-source (takes precedence over auto-detection)
 dagger call -m dagger-packer-plugin build-and-install \
   --source=./packer-plugin-docker \
   --git-source=github.com/hashicorp/packer-plugin-docker \
@@ -73,6 +80,13 @@ Example output:
 Build without installing (returns container with binary, export to retrieve artifacts):
 
 ```bash
+# Auto-detect git-source from go.mod
+dagger call -m dagger-packer-plugin build-plugin \
+  --source=./packer-plugin-docker \
+  --version=1.0.10 \
+  export --path=.
+
+# With explicit git-source
 dagger call -m dagger-packer-plugin build-plugin \
   --source=./packer-plugin-docker \
   --git-source=github.com/hashicorp/packer-plugin-docker \
@@ -112,6 +126,28 @@ dagger call -m dagger-packer-plugin prep-gitignore \
   export --path=.gitignore
 ```
 
+### Git Source Auto-Detection
+
+The module automatically detects the git source path from the `go.mod` file in your source directory. This eliminates the need to manually specify `--git-source` in most cases.
+
+**Priority order:**
+1. Explicit `--git-source` parameter (always takes precedence)
+2. Module path from `go.mod` file
+3. Error (--git-source required if go.mod is missing or invalid)
+
+```bash
+# Auto-detect from go.mod - simplest usage
+dagger call -m dagger-packer-plugin build-and-install \
+  --source=./packer-plugin-docker \
+  --use-version-file \
+  export --path=.
+```
+
+When auto-detected from go.mod, you'll see:
+```
+ℹ Using git-source from go.mod: github.com/hashicorp/packer-plugin-docker
+```
+
 ### Go Version Auto-Detection
 
 The module automatically detects the Go version from a `.go-version` file in your source directory. This is compatible with common Go version managers like `goenv`, `asdf`, and GitHub Actions.
@@ -125,8 +161,7 @@ The module automatically detects the Go version from a `.go-version` file in you
 # Uses .go-version file if present, otherwise defaults to 1.21
 dagger call -m dagger-packer-plugin build-and-install \
   --source=./packer-plugin-docker \
-  --git-source=github.com/hashicorp/packer-plugin-docker \
-  --version=1.0.10 \
+  --use-version-file \
   export --path=.
 ```
 
@@ -142,14 +177,13 @@ Override auto-detected or default versions:
 ```bash
 dagger call -m dagger-packer-plugin build-and-install \
   --source=./packer-plugin-docker \
-  --git-source=github.com/hashicorp/packer-plugin-docker \
   --version=1.0.10 \
   --go-version=1.22 \
   --packer-version=1.10.0 \
   export --path=.
 ```
 
-> **Note:** Explicit `--go-version` always takes precedence over `.go-version` file detection.
+> **Note:** Explicit `--go-version` and `--git-source` always take precedence over auto-detection.
 
 ### Private Git Server
 
@@ -170,7 +204,7 @@ dagger call -m dagger-packer-plugin build-and-install \
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `--source` | Yes | - | Plugin source directory |
-| `--git-source` | Yes | - | Git path (e.g., `github.com/user/plugin`). Auto-normalized to lowercase. |
+| `--git-source` | No | Auto-detected | Git path (e.g., `github.com/user/plugin`). Auto-detected from go.mod, normalized to lowercase. |
 | `--version` | Conditional | - | Semantic version (required unless `--use-version-file`) |
 | `--plugin-name` | No | Auto-detected | Override plugin name. Auto-normalized to lowercase. |
 | `--use-version-file` | No | `false` | Use VERSION file for version |
@@ -255,7 +289,13 @@ These files are ready for Packer to discover and use.
 # Test functions locally
 dagger call detect-version --source=../path/to/plugin
 
-# Run full build
+# Run full build with auto-detected git-source
+dagger call build-and-install \
+  --source=../path/to/plugin \
+  --use-version-file \
+  export --path=/tmp/output
+
+# Run full build with explicit parameters
 dagger call build-and-install \
   --source=../path/to/plugin \
   --git-source=github.com/user/plugin \
