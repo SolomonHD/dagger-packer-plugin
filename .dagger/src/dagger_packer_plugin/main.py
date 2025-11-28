@@ -101,6 +101,61 @@ async def _detect_go_version(source: dagger.Directory) -> Optional[str]:
         return None
 
 
+async def _detect_git_source_from_gomod(source: dagger.Directory) -> tuple[Optional[str], Optional[str]]:
+    """Detect git source from go.mod module declaration.
+    
+    Args:
+        source: Plugin source directory to check for go.mod file
+        
+    Returns:
+        Tuple of (module_path, error_message)
+        - (module_path, None) on success
+        - (None, error_message) on failure
+    """
+    try:
+        go_mod_content = await source.file("go.mod").contents()
+        module_match = re.search(r'^module\s+(\S+)', go_mod_content, re.MULTILINE)
+        if module_match:
+            return module_match.group(1), None
+        return None, "no module declaration found"
+    except Exception:
+        return None, "file not found"
+
+
+async def _resolve_git_source(
+    source: dagger.Directory,
+    explicit_git_source: Optional[str],
+) -> tuple[str, str, Optional[str]]:
+    """Resolve the git source to use based on priority.
+    
+    Priority order:
+    1. Explicit --git-source parameter (if provided)
+    2. Auto-detected from go.mod module path
+    3. Error (cannot proceed without git_source)
+    
+    Args:
+        source: Plugin source directory
+        explicit_git_source: Explicitly provided git_source (None means use auto-detection)
+        
+    Returns:
+        Tuple of (resolved_value, source_description, error_message)
+        - (value, "explicit", None) if explicit value provided
+        - (value, "gomod", None) if auto-detected from go.mod
+        - ("", "error", error_message) if cannot be determined
+    """
+    # If explicit git_source provided, use it
+    if explicit_git_source is not None:
+        return explicit_git_source, "explicit", None
+    
+    # Try to detect from go.mod file
+    detected, error_msg = await _detect_git_source_from_gomod(source)
+    if detected:
+        return detected, "gomod", None
+    
+    # Cannot determine git_source - return error
+    return "", "error", f"--git-source required (could not auto-detect from go.mod: {error_msg})"
+
+
 async def _resolve_go_version(
     source: dagger.Directory,
     explicit_version: Optional[str],
@@ -276,78 +331,46 @@ class DaggerPackerPlugin:
     # Build Plugin Capability
     # ========================================================================
 
-    @function
-    async def build_plugin(
+    async def _build_plugin_internal(
         self,
-        source: Annotated[
-            dagger.Directory,
-            Doc("Plugin source directory containing Go code (use --source=. for your project)")
-        ],
-        git_source: Annotated[
-            str,
-            Doc("Git path for the plugin (e.g., github.com/user/packer-plugin-example). Automatically normalized to lowercase.")
-        ],
-        version: Annotated[
-            Optional[str],
-            Doc("Semantic version (e.g., 1.0.10). Required unless use_version_file is true")
-        ] = None,
-        plugin_name: Annotated[
-            Optional[str],
-            Doc("Plugin name override (auto-detected from directory name if not provided). Automatically normalized to lowercase.")
-        ] = None,
-        use_version_file: Annotated[
-            bool,
-            Doc("Use VERSION file from source as version (default: false)")
-        ] = False,
-        update_version_file: Annotated[
-            bool,
-            Doc("Update VERSION file with provided version before build (default: false)")
-        ] = False,
-        go_version: Annotated[
-            Optional[str],
-            Doc("Go version for building. Auto-detected from .go-version file if not provided, defaults to 1.21")
-        ] = None,
-        _skip_normalization: bool = False,
-        _resolved_go_version: Optional[str] = None,
+        source: dagger.Directory,
+        git_source: Optional[str],
+        version: Optional[str],
+        plugin_name: Optional[str],
+        use_version_file: bool,
+        update_version_file: bool,
+        go_version: Optional[str],
+        skip_normalization: bool,
+        resolved_go_version: Optional[str],
+        resolved_git_source: Optional[str],
     ) -> dagger.Container:
-        """
-        Build a Packer plugin using Go with proper ldflags.
-        
-        This function compiles the plugin with ldflags that clear VersionPrerelease
-        to avoid -dev suffixes that break Packer's plugin discovery system.
-        
-        Go version is determined by priority:
-        1. Explicit --go-version parameter
-        2. .go-version file in source directory
-        3. Default fallback (1.21)
-        
-        Note: git_source and plugin_name are automatically normalized to lowercase
-        per HashiCorp Packer's requirements. A warning is output if normalization occurs.
-        
-        Args:
-            source: Plugin source directory
-            git_source: Git import path for ldflags
-            version: Semantic version string
-            plugin_name: Override auto-detected plugin name
-            use_version_file: Read version from VERSION file
-            update_version_file: Update VERSION file before build
-            go_version: Go container image version (auto-detected from .go-version if not provided)
-            
-        Returns:
-            Container with built plugin binary at /work/packer-plugin-{name}
-        """
+        """Internal build plugin implementation with pre-resolved values support."""
         warnings: list[str] = []
         
+        # Resolve git_source (use pre-resolved if provided by build_and_install)
+        if resolved_git_source:
+            actual_git_source = resolved_git_source
+        else:
+            resolved_git_source_val, git_source_source, git_source_error = await _resolve_git_source(source, git_source)
+            if git_source_error:
+                return dag.container().from_("alpine:latest").with_exec([
+                    "sh", "-c",
+                    f"echo '✗ Error: {git_source_error}' && exit 1"
+                ])
+            actual_git_source = resolved_git_source_val
+            if git_source_source == "gomod":
+                warnings.append(f"ℹ Using git-source from go.mod: {actual_git_source}")
+        
         # Normalize git_source to lowercase (unless called from build_and_install with pre-normalized values)
-        if not _skip_normalization:
-            normalized_git_source, git_source_changed = _normalize_to_lowercase(git_source)
+        if not skip_normalization:
+            normalized_git_source, git_source_changed = _normalize_to_lowercase(actual_git_source)
             if git_source_changed:
-                warnings.append(_log_normalization_warning("git-source", git_source, normalized_git_source))
-            git_source = normalized_git_source
+                warnings.append(_log_normalization_warning("git-source", actual_git_source, normalized_git_source))
+            actual_git_source = normalized_git_source
         
         # Resolve Go version (use pre-resolved if provided by build_and_install)
-        if _resolved_go_version:
-            actual_go_version = _resolved_go_version
+        if resolved_go_version:
+            actual_go_version = resolved_go_version
         else:
             actual_go_version, version_source = await _resolve_go_version(source, go_version)
             if version_source == "file":
@@ -388,7 +411,7 @@ class DaggerPackerPlugin:
         # Normalize and auto-detect plugin name
         actual_plugin_name: str
         if plugin_name:
-            if not _skip_normalization:
+            if not skip_normalization:
                 normalized_name, name_changed = _normalize_to_lowercase(plugin_name)
                 if name_changed:
                     warnings.append(_log_normalization_warning("plugin-name", plugin_name, normalized_name))
@@ -397,7 +420,7 @@ class DaggerPackerPlugin:
                 actual_plugin_name = plugin_name
         else:
             # Auto-detect from git_source path (last segment)
-            git_parts = git_source.rstrip("/").split("/")
+            git_parts = actual_git_source.rstrip("/").split("/")
             dirname = git_parts[-1] if git_parts else "plugin"
             actual_plugin_name, name_changed = self._extract_plugin_name(dirname)
             # Note: warning for auto-detected names is suppressed since they come from normalized git_source
@@ -408,8 +431,8 @@ class DaggerPackerPlugin:
         # Always include VersionPrerelease= (empty to avoid -dev)
         # Also set Version if explicitly provided
         ldflags_parts = [
-            f"-X {git_source}/version.Version={actual_version}",
-            f"-X {git_source}/version.VersionPrerelease=",
+            f"-X {actual_git_source}/version.Version={actual_version}",
+            f"-X {actual_git_source}/version.VersionPrerelease=",
         ]
         ldflags = " ".join(ldflags_parts)
         
@@ -448,53 +471,99 @@ class DaggerPackerPlugin:
         
         return build_container
 
-    # ========================================================================
-    # Install Plugin Capability
-    # ========================================================================
-
     @function
-    async def install_plugin(
+    async def build_plugin(
         self,
-        build_container: Annotated[
-            dagger.Container,
-            Doc("Container with built plugin binary (from build_plugin)")
+        source: Annotated[
+            dagger.Directory,
+            Doc("Plugin source directory containing Go code (use --source=. for your project)")
         ],
         git_source: Annotated[
-            str,
-            Doc("Git path for plugin registration (e.g., github.com/user/packer-plugin-example). Automatically normalized to lowercase.")
-        ],
+            Optional[str],
+            Doc("Git path for the plugin. Auto-detected from go.mod if not provided. Automatically normalized to lowercase.")
+        ] = None,
+        version: Annotated[
+            Optional[str],
+            Doc("Semantic version (e.g., 1.0.10). Required unless use_version_file is true")
+        ] = None,
         plugin_name: Annotated[
             Optional[str],
-            Doc("Plugin name (auto-detected from git_source if not provided). Automatically normalized to lowercase.")
+            Doc("Plugin name override (auto-detected from directory name if not provided). Automatically normalized to lowercase.")
         ] = None,
-        packer_version: Annotated[
-            str,
-            Doc("Packer image version to use (default: latest)")
-        ] = "latest",
-        _skip_normalization: bool = False,
-    ) -> dagger.Directory:
+        use_version_file: Annotated[
+            bool,
+            Doc("Use VERSION file from source as version (default: false)")
+        ] = False,
+        update_version_file: Annotated[
+            bool,
+            Doc("Update VERSION file with provided version before build (default: false)")
+        ] = False,
+        go_version: Annotated[
+            Optional[str],
+            Doc("Go version for building. Auto-detected from .go-version file if not provided, defaults to 1.21")
+        ] = None,
+    ) -> dagger.Container:
         """
-        Install a built Packer plugin using HashiCorp Packer container.
+        Build a Packer plugin using Go with proper ldflags.
         
-        This function runs `packer plugins install` to register the plugin
-        and generate checksum files, then returns the installation artifacts.
+        This function compiles the plugin with ldflags that clear VersionPrerelease
+        to avoid -dev suffixes that break Packer's plugin discovery system.
+        
+        Git source is determined by priority:
+        1. Explicit --git-source parameter
+        2. Auto-detected from go.mod module path
+        3. Error (git-source is required)
+        
+        Go version is determined by priority:
+        1. Explicit --go-version parameter
+        2. .go-version file in source directory
+        3. Default fallback (1.21)
         
         Note: git_source and plugin_name are automatically normalized to lowercase
         per HashiCorp Packer's requirements. A warning is output if normalization occurs.
         
         Args:
-            build_container: Container with built binary from build_plugin
-            git_source: Git path for plugin registration
-            plugin_name: Plugin name override
-            packer_version: Packer container image version
+            source: Plugin source directory
+            git_source: Git import path for ldflags (auto-detected from go.mod if not provided)
+            version: Semantic version string
+            plugin_name: Override auto-detected plugin name
+            use_version_file: Read version from VERSION file
+            update_version_file: Update VERSION file before build
+            go_version: Go container image version (auto-detected from .go-version if not provided)
             
         Returns:
-            Directory containing installation artifacts (binary + checksum)
+            Container with built plugin binary at /work/packer-plugin-{name}
         """
+        return await self._build_plugin_internal(
+            source=source,
+            git_source=git_source,
+            version=version,
+            plugin_name=plugin_name,
+            use_version_file=use_version_file,
+            update_version_file=update_version_file,
+            go_version=go_version,
+            skip_normalization=False,
+            resolved_go_version=None,
+            resolved_git_source=None,
+        )
+
+    # ========================================================================
+    # Install Plugin Capability
+    # ========================================================================
+
+    async def _install_plugin_internal(
+        self,
+        build_container: dagger.Container,
+        git_source: str,
+        plugin_name: Optional[str],
+        packer_version: str,
+        skip_normalization: bool,
+    ) -> dagger.Directory:
+        """Internal install plugin implementation with skip_normalization support."""
         warnings: list[str] = []
         
         # Normalize git_source to lowercase (unless called from build_and_install with pre-normalized values)
-        if not _skip_normalization:
+        if not skip_normalization:
             normalized_git_source, git_source_changed = _normalize_to_lowercase(git_source)
             if git_source_changed:
                 warnings.append(_log_normalization_warning("git-source", git_source, normalized_git_source))
@@ -508,7 +577,7 @@ class DaggerPackerPlugin:
         # Normalize and auto-detect plugin name
         actual_plugin_name: str
         if plugin_name:
-            if not _skip_normalization:
+            if not skip_normalization:
                 normalized_name, name_changed = _normalize_to_lowercase(plugin_name)
                 if name_changed:
                     warnings.append(_log_normalization_warning("plugin-name", plugin_name, normalized_name))
@@ -554,6 +623,52 @@ class DaggerPackerPlugin:
         
         # Return the directory containing the installed plugins
         return packer_container.directory(plugin_path)
+
+    @function
+    async def install_plugin(
+        self,
+        build_container: Annotated[
+            dagger.Container,
+            Doc("Container with built plugin binary (from build_plugin)")
+        ],
+        git_source: Annotated[
+            str,
+            Doc("Git path for plugin registration (e.g., github.com/user/packer-plugin-example). Automatically normalized to lowercase.")
+        ],
+        plugin_name: Annotated[
+            Optional[str],
+            Doc("Plugin name (auto-detected from git_source if not provided). Automatically normalized to lowercase.")
+        ] = None,
+        packer_version: Annotated[
+            str,
+            Doc("Packer image version to use (default: latest)")
+        ] = "latest",
+    ) -> dagger.Directory:
+        """
+        Install a built Packer plugin using HashiCorp Packer container.
+        
+        This function runs `packer plugins install` to register the plugin
+        and generate checksum files, then returns the installation artifacts.
+        
+        Note: git_source and plugin_name are automatically normalized to lowercase
+        per HashiCorp Packer's requirements. A warning is output if normalization occurs.
+        
+        Args:
+            build_container: Container with built binary from build_plugin
+            git_source: Git path for plugin registration
+            plugin_name: Plugin name override
+            packer_version: Packer container image version
+            
+        Returns:
+            Directory containing installation artifacts (binary + checksum)
+        """
+        return await self._install_plugin_internal(
+            build_container=build_container,
+            git_source=git_source,
+            plugin_name=plugin_name,
+            packer_version=packer_version,
+            skip_normalization=False,
+        )
 
     # ========================================================================
     # Gitignore Prep Capability
@@ -688,9 +803,9 @@ class DaggerPackerPlugin:
             Doc("Plugin source directory containing Go code (use --source=. for your project)")
         ],
         git_source: Annotated[
-            str,
-            Doc("Git path for the plugin (e.g., github.com/user/packer-plugin-example). Automatically normalized to lowercase.")
-        ],
+            Optional[str],
+            Doc("Git path for the plugin. Auto-detected from go.mod if not provided. Automatically normalized to lowercase.")
+        ] = None,
         version: Annotated[
             Optional[str],
             Doc("Semantic version (e.g., 1.0.10). Required unless use_version_file is true")
@@ -722,6 +837,11 @@ class DaggerPackerPlugin:
         This convenience function chains build_plugin and install_plugin,
         returning installation artifacts ready to export.
         
+        Git source is determined by priority:
+        1. Explicit --git-source parameter
+        2. Auto-detected from go.mod module path
+        3. Error (git-source is required)
+        
         Go version is determined by priority:
         1. Explicit --go-version parameter
         2. .go-version file in source directory
@@ -732,7 +852,7 @@ class DaggerPackerPlugin:
         
         Args:
             source: Plugin source directory
-            git_source: Git import path
+            git_source: Git import path (auto-detected from go.mod if not provided)
             version: Semantic version string
             plugin_name: Override auto-detected plugin name
             use_version_file: Read version from VERSION file
@@ -746,12 +866,29 @@ class DaggerPackerPlugin:
         Example:
             dagger call build-and-install \\
               --source=. \\
-              --git-source=github.com/user/packer-plugin-example \\
-              --version=1.0.0 \\
+              --use-version-file \\
               export --path=.
         """
+        # Resolve git_source once at entry point to avoid duplicate detection
+        resolved_git_source, git_source_source, git_source_error = await _resolve_git_source(source, git_source)
+        if git_source_error:
+            # Return error container - let build_plugin handle error display
+            return await self.build_plugin(
+                source=source,
+                git_source=None,
+                version=version,
+                plugin_name=plugin_name,
+                use_version_file=use_version_file,
+                update_version_file=update_version_file,
+                go_version=go_version,
+            )
+        
+        git_source_info: Optional[str] = None
+        if git_source_source == "gomod":
+            git_source_info = f"ℹ Using git-source from go.mod: {resolved_git_source}"
+        
         # Normalize inputs once at the entry point to avoid duplicate warnings
-        normalized_git_source, git_source_changed = _normalize_to_lowercase(git_source)
+        normalized_git_source, git_source_changed = _normalize_to_lowercase(resolved_git_source)
         normalized_plugin_name: Optional[str] = None
         plugin_name_changed = False
         
@@ -764,8 +901,8 @@ class DaggerPackerPlugin:
         if go_version_source == "file":
             go_version_info = f"ℹ Using Go {resolved_go_version} from .go-version file"
         
-        # Build the plugin (pass normalized and pre-resolved values)
-        build_container = await self.build_plugin(
+        # Build the plugin (pass normalized and pre-resolved values using internal method)
+        build_container = await self._build_plugin_internal(
             source=source,
             git_source=normalized_git_source,
             version=version,
@@ -773,25 +910,28 @@ class DaggerPackerPlugin:
             use_version_file=use_version_file,
             update_version_file=update_version_file,
             go_version=None,  # Don't pass explicit, use resolved
-            _skip_normalization=True,
-            _resolved_go_version=resolved_go_version,
+            skip_normalization=True,
+            resolved_go_version=resolved_go_version,
+            resolved_git_source=normalized_git_source,
         )
         
         # Add warnings/info to the build container
+        if git_source_info:
+            build_container = build_container.with_exec(["sh", "-c", f"echo '{git_source_info}'"])
         if go_version_info:
             build_container = build_container.with_exec(["sh", "-c", f"echo '{go_version_info}'"])
         if git_source_changed:
-            warning = _log_normalization_warning("git-source", git_source, normalized_git_source)
+            warning = _log_normalization_warning("git-source", resolved_git_source, normalized_git_source)
             build_container = build_container.with_exec(["sh", "-c", f"echo '{warning}'"])
         if plugin_name_changed:
             warning = _log_normalization_warning("plugin-name", plugin_name, normalized_plugin_name)
             build_container = build_container.with_exec(["sh", "-c", f"echo '{warning}'"])
         
         # Install the plugin (pass normalized values, skip internal normalization)
-        return await self.install_plugin(
+        return await self._install_plugin_internal(
             build_container=build_container,
             git_source=normalized_git_source,
             plugin_name=normalized_plugin_name,
             packer_version=packer_version,
-            _skip_normalization=True,
+            skip_normalization=True,
         )
