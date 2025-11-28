@@ -1,0 +1,8 @@
+{
+  "name": "dagger-packer-plugin",
+  "engineVersion": "v0.19.7",
+  "sdk": {
+    "source": "python"
+  },
+  "source": ".dagger"
+}
