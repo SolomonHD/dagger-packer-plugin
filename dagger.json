@@ -1,5 +1,5 @@
 {
-  "name": "dagger-packer-plugin",
+  "name": "packer-plugin",
   "engineVersion": "v0.19.7",
   "sdk": {
     "source": "python"

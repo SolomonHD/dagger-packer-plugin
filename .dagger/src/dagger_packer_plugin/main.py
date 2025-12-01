@@ -189,7 +189,7 @@ async def _resolve_go_version(
 
 
 @object_type
-class DaggerPackerPlugin:
+class PackerPlugin:
     """Automate Packer plugin builds and installations with proper versioning."""
 
     # ========================================================================
@@ -343,8 +343,10 @@ class DaggerPackerPlugin:
         skip_normalization: bool,
         resolved_go_version: Optional[str],
         resolved_git_source: Optional[str],
+        target_os: str = "linux",
+        target_arch: str = "amd64",
     ) -> dagger.Container:
-        """Internal build plugin implementation with pre-resolved values support."""
+        """Internal build plugin implementation with pre-resolved values support and cross-compilation."""
         warnings: list[str] = []
         
         # Resolve git_source (use pre-resolved if provided by build_and_install)
@@ -425,7 +427,10 @@ class DaggerPackerPlugin:
             actual_plugin_name, name_changed = self._extract_plugin_name(dirname)
             # Note: warning for auto-detected names is suppressed since they come from normalized git_source
         
+        # Determine binary name with Windows .exe extension handling
         binary_name = f"packer-plugin-{actual_plugin_name}"
+        if target_os == "windows":
+            binary_name += ".exe"
         
         # Construct ldflags
         # Always include VersionPrerelease= (empty to avoid -dev)
@@ -444,6 +449,8 @@ class DaggerPackerPlugin:
             .with_mounted_directory("/work", source)
             .with_workdir("/work")
             .with_env_variable("CGO_ENABLED", "0")
+            .with_env_variable("GOOS", target_os)
+            .with_env_variable("GOARCH", target_arch)
             .with_env_variable("DAGGER_CACHE_BUST", cache_bust)
         )
         
@@ -472,7 +479,7 @@ class DaggerPackerPlugin:
         return build_container
 
     @function
-    async def build_plugin(
+    async def build_binary(
         self,
         source: Annotated[
             dagger.Directory,
@@ -502,12 +509,27 @@ class DaggerPackerPlugin:
             Optional[str],
             Doc("Go version for building. Auto-detected from .go-version file if not provided, defaults to 1.21")
         ] = None,
+        target_os: Annotated[
+            str,
+            Doc("Target operating system for cross-compilation (default: linux)")
+        ] = "linux",
+        target_arch: Annotated[
+            str,
+            Doc("Target CPU architecture for cross-compilation (default: amd64)")
+        ] = "amd64",
     ) -> dagger.Container:
         """
-        Build a Packer plugin using Go with proper ldflags.
+        Build only the raw Go binary for a Packer plugin (intermediate/development use).
         
-        This function compiles the plugin with ldflags that clear VersionPrerelease
-        to avoid -dev suffixes that break Packer's plugin discovery system.
+        This function compiles the plugin binary with proper ldflags that clear VersionPrerelease
+        to avoid -dev suffixes. It returns a container with only the compiled binary - no checksums
+        or metadata files. This is useful for development workflows or when you need just the binary.
+        
+        For production use, consider using build_artifacts() instead, which creates the complete
+        plugin package (binary + checksum + metadata) ready for distribution or installation.
+        
+        Supports cross-compilation by setting GOOS and GOARCH environment variables.
+        When building for Windows (target_os=windows), the binary will have .exe extension.
         
         Git source is determined by priority:
         1. Explicit --git-source parameter
@@ -530,9 +552,11 @@ class DaggerPackerPlugin:
             use_version_file: Read version from VERSION file
             update_version_file: Update VERSION file before build
             go_version: Go container image version (auto-detected from .go-version if not provided)
+            target_os: Target OS for cross-compilation (linux, darwin, windows)
+            target_arch: Target architecture for cross-compilation (amd64, arm64, 386)
             
         Returns:
-            Container with built plugin binary at /work/packer-plugin-{name}
+            Container with built plugin binary at /work/packer-plugin-{name}[.exe]
         """
         return await self._build_plugin_internal(
             source=source,
@@ -545,6 +569,8 @@ class DaggerPackerPlugin:
             skip_normalization=False,
             resolved_go_version=None,
             resolved_git_source=None,
+            target_os=target_os,
+            target_arch=target_arch,
         )
 
     # ========================================================================
@@ -558,8 +584,9 @@ class DaggerPackerPlugin:
         plugin_name: Optional[str],
         packer_version: str,
         skip_normalization: bool,
+        target_os: str = "linux",
     ) -> dagger.Directory:
-        """Internal install plugin implementation with skip_normalization support."""
+        """Internal install plugin implementation with skip_normalization and cross-compilation support."""
         warnings: list[str] = []
         
         # Normalize git_source to lowercase (unless called from build_and_install with pre-normalized values)
@@ -590,7 +617,10 @@ class DaggerPackerPlugin:
             dirname = git_parts[-1] if git_parts else "plugin"
             actual_plugin_name, _ = self._extract_plugin_name(dirname)
         
+        # Determine binary name with Windows .exe extension handling
         binary_name = f"packer-plugin-{actual_plugin_name}"
+        if target_os == "windows":
+            binary_name += ".exe"
         
         # Get the binary from build container
         built_binary = build_container.file(f"/work/{binary_name}")
@@ -629,7 +659,7 @@ class DaggerPackerPlugin:
         self,
         build_container: Annotated[
             dagger.Container,
-            Doc("Container with built plugin binary (from build_plugin)")
+            Doc("Container with built plugin binary (from build_binary)")
         ],
         git_source: Annotated[
             str,
@@ -654,7 +684,7 @@ class DaggerPackerPlugin:
         per HashiCorp Packer's requirements. A warning is output if normalization occurs.
         
         Args:
-            build_container: Container with built binary from build_plugin
+            build_container: Container with built binary from build_binary
             git_source: Git path for plugin registration
             plugin_name: Plugin name override
             packer_version: Packer container image version
@@ -796,7 +826,7 @@ class DaggerPackerPlugin:
     # ========================================================================
 
     @function
-    async def build_and_install(
+    async def build_artifacts(
         self,
         source: Annotated[
             dagger.Directory,
@@ -830,12 +860,28 @@ class DaggerPackerPlugin:
             str,
             Doc("Packer image version for installation (default: latest)")
         ] = "latest",
+        target_os: Annotated[
+            str,
+            Doc("Target operating system for cross-compilation (default: linux)")
+        ] = "linux",
+        target_arch: Annotated[
+            str,
+            Doc("Target CPU architecture for cross-compilation (default: amd64)")
+        ] = "amd64",
     ) -> dagger.Directory:
         """
-        Build and install a Packer plugin in a single workflow.
+        Build complete production-ready plugin artifacts (binary + checksum + metadata).
         
-        This convenience function chains build_plugin and install_plugin,
-        returning installation artifacts ready to export.
+        This is the recommended workflow for most use cases. It builds the plugin binary,
+        creates checksum files, and packages everything according to Packer plugin
+        distribution conventions. The output is ready for distribution or local installation
+        via `packer plugins install --path`.
+        
+        For development workflows where you only need the compiled binary without checksums,
+        consider using build_binary() instead.
+        
+        Supports cross-compilation by setting GOOS and GOARCH environment variables.
+        When building for Windows (target_os=windows), the binary will have .exe extension.
         
         Git source is determined by priority:
         1. Explicit --git-source parameter
@@ -859,12 +905,14 @@ class DaggerPackerPlugin:
             update_version_file: Update VERSION file before build
             go_version: Go container image version (auto-detected from .go-version if not provided)
             packer_version: Packer container image version
+            target_os: Target OS for cross-compilation (linux, darwin, windows)
+            target_arch: Target architecture for cross-compilation (amd64, arm64, 386)
             
         Returns:
-            Directory with installation artifacts (binary + checksum)
+            Directory with complete plugin artifacts (binary + checksum + metadata) ready for distribution
             
         Example:
-            dagger call build-and-install \\
+            dagger call build-artifacts \\
               --source=. \\
               --use-version-file \\
               export --path=.
@@ -872,8 +920,8 @@ class DaggerPackerPlugin:
         # Resolve git_source once at entry point to avoid duplicate detection
         resolved_git_source, git_source_source, git_source_error = await _resolve_git_source(source, git_source)
         if git_source_error:
-            # Return error container - let build_plugin handle error display
-            return await self.build_plugin(
+            # Return error container - let build_binary handle error display
+            return await self.build_binary(
                 source=source,
                 git_source=None,
                 version=version,
@@ -913,6 +961,8 @@ class DaggerPackerPlugin:
             skip_normalization=True,
             resolved_go_version=resolved_go_version,
             resolved_git_source=normalized_git_source,
+            target_os=target_os,
+            target_arch=target_arch,
         )
         
         # Add warnings/info to the build container
@@ -934,4 +984,5 @@ class DaggerPackerPlugin:
             plugin_name=normalized_plugin_name,
             packer_version=packer_version,
             skip_normalization=True,
+            target_os=target_os,
         )

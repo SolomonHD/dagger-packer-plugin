@@ -13,4 +13,4 @@ Key features:
 - Single workflow combining build and install phases
 """
 
-from .main import DaggerPackerPlugin as DaggerPackerPlugin
+from .main import PackerPlugin as PackerPlugin
