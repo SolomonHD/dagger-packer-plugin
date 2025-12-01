@@ -104,15 +104,19 @@ The module SHALL execute the Go build inside a container using the official Go i
 - **THEN** the module strips the trailing newline and uses `golang:1.23.2` container image
 
 ### Requirement: Build Output
-The module SHALL return a Dagger Container containing the built plugin binary.
+The module SHALL return a Dagger Container containing the built plugin binary. This function is intended for intermediate/development use when only the compiled binary is needed.
 
 #### Scenario: Successful build
-- **WHEN** Go build completes successfully
+- **WHEN** Go build completes successfully via `build-binary` function
 - **THEN** the container contains file `/work/packer-plugin-{name}` with executable permissions
 
 #### Scenario: Build failure
-- **WHEN** Go build fails (compilation errors)
+- **WHEN** Go build fails (compilation errors) during `build-binary` execution
 - **THEN** the module surfaces the build error with Go compiler output
+
+#### Scenario: Intermediate development workflow
+- **WHEN** developer needs to test binary compilation without creating complete artifacts
+- **THEN** `build-binary` provides the compiled binary in a container for inspection or testing
 
 ### Requirement: Git Source Lowercase Normalization
 The module SHALL normalize the `git_source` parameter to lowercase before use in ldflags and output naming.
@@ -168,4 +172,68 @@ The module SHALL apply the same lowercase normalization to auto-detected git_sou
 - **THEN** the module uses the path without modification
 - **AND** no normalization warning is output
 - **AND** outputs info: `ℹ Using git-source from go.mod: github.com/hashicorp/packer-plugin-docker`
+
+### Requirement: Target Operating System
+The module SHALL accept an optional `target_os` parameter specifying the target operating system for cross-compilation.
+
+#### Scenario: Default target OS when not provided
+- **WHEN** `target_os` parameter is not provided
+- **THEN** the module defaults to `linux`
+- **AND** the Go build runs with `GOOS=linux` environment variable
+
+#### Scenario: Explicit target OS provided
+- **WHEN** `target_os` parameter is `darwin`
+- **THEN** the Go build runs with `GOOS=darwin` environment variable
+
+#### Scenario: Windows target OS
+- **WHEN** `target_os` parameter is `windows`
+- **THEN** the Go build runs with `GOOS=windows` environment variable
+- **AND** the output binary has `.exe` extension
+
+### Requirement: Target Architecture
+The module SHALL accept an optional `target_arch` parameter specifying the target CPU architecture for cross-compilation.
+
+#### Scenario: Default target architecture when not provided
+- **WHEN** `target_arch` parameter is not provided
+- **THEN** the module defaults to `amd64`
+- **AND** the Go build runs with `GOARCH=amd64` environment variable
+
+#### Scenario: ARM64 target architecture
+- **WHEN** `target_arch` parameter is `arm64`
+- **THEN** the Go build runs with `GOARCH=arm64` environment variable
+
+#### Scenario: 386 target architecture
+- **WHEN** `target_arch` parameter is `386`
+- **THEN** the Go build runs with `GOARCH=386` environment variable
+
+### Requirement: Cross-Compilation Environment
+The module SHALL set `GOOS`, `GOARCH`, and `CGO_ENABLED=0` environment variables during the Go build process.
+
+#### Scenario: Full cross-compilation environment
+- **WHEN** building with `target_os=darwin` and `target_arch=arm64`
+- **THEN** the Go build container has environment variables:
+  - `GOOS=darwin`
+  - `GOARCH=arm64`
+  - `CGO_ENABLED=0`
+
+#### Scenario: Default cross-compilation environment
+- **WHEN** building without specifying `target_os` or `target_arch`
+- **THEN** the Go build container has environment variables:
+  - `GOOS=linux`
+  - `GOARCH=amd64`
+  - `CGO_ENABLED=0`
+
+### Requirement: Function Purpose Documentation
+The `build_binary` function SHALL be documented as an intermediate/development tool for compiling the raw Go binary, while `build_artifacts` (in install-plugin spec) is the recommended workflow for production use.
+
+#### Scenario: Usage guidance in docstring
+- **WHEN** user invokes `dagger functions` or reads function help
+- **THEN** the `build-binary` docstring clearly indicates it builds only the binary
+- **AND** recommends using `build-artifacts` for production-ready plugin packages
+
+#### Scenario: README documentation structure
+- **WHEN** user reads the README
+- **THEN** primary examples feature `build-artifacts` workflow
+- **AND** `build-binary` examples appear in "Advanced" or "Build Binary Only" section
+- **AND** context explains when to use each function
 

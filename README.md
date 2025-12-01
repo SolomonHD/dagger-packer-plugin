@@ -5,7 +5,7 @@ A Dagger module (Python SDK) that automates building and installing Packer plugi
 ## Installation
 
 ```bash
-dagger install github.com/SolomonHD/dagger-packer-plugin@v1.0.0
+dagger install github.com/SolomonHD/dagger-packer-plugin@v1.1.0
 ```
 
 ## Features
@@ -22,21 +22,21 @@ dagger install github.com/SolomonHD/dagger-packer-plugin@v1.0.0
 
 ## Usage
 
-> **Note:** These examples assume you've installed the module using `dagger install`. If you're developing locally within this repository, omit the `-m dagger-packer-plugin` flag.
+> **Note:** These examples assume you've installed the module using `dagger install`. If you're developing locally within this repository, omit the `-m packer-plugin` flag.
 
-### Basic Build and Install
+### Basic Build and Create Artifacts
 
-Build a plugin and install it in one command:
+Build a plugin and create complete artifacts in one command:
 
 ```bash
 # Simplest form - auto-detects git-source from go.mod and version from VERSION file
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-docker \
   --use-version-file \
   export --path=.
 
 # With explicit git-source (takes precedence over auto-detection)
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-docker \
   --git-source=github.com/hashicorp/packer-plugin-docker \
   --version=1.0.10 \
@@ -48,7 +48,7 @@ dagger call -m dagger-packer-plugin build-and-install \
 If your plugin has a VERSION file, you can use it as the authoritative version:
 
 ```bash
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-docker \
   --git-source=github.com/hashicorp/packer-plugin-docker \
   --use-version-file \
@@ -60,7 +60,7 @@ dagger call -m dagger-packer-plugin build-and-install \
 Analyze a plugin to see how it manages version information:
 
 ```bash
-dagger call -m dagger-packer-plugin detect-version \
+dagger call -m packer-plugin detect-version \
   --source=./packer-plugin-docker
 ```
 
@@ -75,19 +75,19 @@ Example output:
 }
 ```
 
-### Build Plugin Only
+### Build Binary Only
 
-Build without installing (returns container with binary, export to retrieve artifacts):
+Build only the raw Go binary without checksums (for development/testing):
 
 ```bash
 # Auto-detect git-source from go.mod
-dagger call -m dagger-packer-plugin build-plugin \
+dagger call -m packer-plugin build-binary \
   --source=./packer-plugin-docker \
   --version=1.0.10 \
   export --path=.
 
 # With explicit git-source
-dagger call -m dagger-packer-plugin build-plugin \
+dagger call -m packer-plugin build-binary \
   --source=./packer-plugin-docker \
   --git-source=github.com/hashicorp/packer-plugin-docker \
   --version=1.0.10 \
@@ -99,7 +99,7 @@ dagger call -m dagger-packer-plugin build-plugin \
 Update the VERSION file with an explicit version before building:
 
 ```bash
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-docker \
   --git-source=github.com/hashicorp/packer-plugin-docker \
   --version=2.0.0 \
@@ -112,7 +112,7 @@ dagger call -m dagger-packer-plugin build-and-install \
 Add plugin binary to .gitignore (plugin name auto-detected from go.mod):
 
 ```bash
-dagger call -m dagger-packer-plugin prep-gitignore \
+dagger call -m packer-plugin prep-gitignore \
   --source=. \
   export --path=.gitignore
 ```
@@ -120,7 +120,7 @@ dagger call -m dagger-packer-plugin prep-gitignore \
 With explicit plugin name override:
 
 ```bash
-dagger call -m dagger-packer-plugin prep-gitignore \
+dagger call -m packer-plugin prep-gitignore \
   --source=. \
   --plugin-name=docker \
   export --path=.gitignore
@@ -137,7 +137,7 @@ The module automatically detects the git source path from the `go.mod` file in y
 
 ```bash
 # Auto-detect from go.mod - simplest usage
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-docker \
   --use-version-file \
   export --path=.
@@ -159,7 +159,7 @@ The module automatically detects the Go version from a `.go-version` file in you
 
 ```bash
 # Uses .go-version file if present, otherwise defaults to 1.21
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-docker \
   --use-version-file \
   export --path=.
@@ -175,7 +175,7 @@ When a `.go-version` file is detected, you'll see:
 Override auto-detected or default versions:
 
 ```bash
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-docker \
   --version=1.0.10 \
   --go-version=1.22 \
@@ -185,12 +185,48 @@ dagger call -m dagger-packer-plugin build-and-install \
 
 > **Note:** Explicit `--go-version` and `--git-source` always take precedence over auto-detection.
 
+### Cross-Compilation
+
+Build plugins for different operating systems and architectures using `--target-os` and `--target-arch`:
+
+```bash
+# Build for macOS ARM64 (Apple Silicon)
+dagger call -m packer-plugin build-artifacts \
+  --source=./packer-plugin-docker \
+  --use-version-file \
+  --target-os=darwin \
+  --target-arch=arm64 \
+  export --path=.
+
+# Build for Windows AMD64
+dagger call -m packer-plugin build-artifacts \
+  --source=./packer-plugin-docker \
+  --use-version-file \
+  --target-os=windows \
+  --target-arch=amd64 \
+  export --path=.
+
+# Build for Linux ARM64
+dagger call -m packer-plugin build-artifacts \
+  --source=./packer-plugin-docker \
+  --use-version-file \
+  --target-os=linux \
+  --target-arch=arm64 \
+  export --path=.
+```
+
+**Supported targets:**
+- **Operating Systems:** `linux`, `darwin`, `windows`
+- **Architectures:** `amd64`, `arm64`, `386`
+
+> **Note:** Windows builds automatically append `.exe` extension to the binary name.
+
 ### Private Git Server
 
 Works with any git hosting:
 
 ```bash
-dagger call -m dagger-packer-plugin build-and-install \
+dagger call -m packer-plugin build-artifacts \
   --source=./packer-plugin-custom \
   --git-source=git.company.internal/team/packer-plugin-custom \
   --version=1.0.0 \
@@ -199,7 +235,7 @@ dagger call -m dagger-packer-plugin build-and-install \
 
 ## Parameters
 
-### build-and-install / build-plugin
+### build-artifacts / build-binary
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
@@ -211,6 +247,8 @@ dagger call -m dagger-packer-plugin build-and-install \
 | `--update-version-file` | No | `false` | Update VERSION file before build |
 | `--go-version` | No | Auto-detected | Go version. Auto-detected from `.go-version` file, falls back to `1.21` |
 | `--packer-version` | No | `latest` | Packer container image version |
+| `--target-os` | No | `linux` | Target operating system for cross-compilation (`linux`, `darwin`, `windows`) |
+| `--target-arch` | No | `amd64` | Target CPU architecture for cross-compilation (`amd64`, `arm64`, `386`) |
 
 ### detect-version
 
@@ -271,7 +309,7 @@ The module detects three version management patterns:
 
 ## Output Structure
 
-After `build-and-install`, you'll have:
+After `build-artifacts`, you'll have:
 
 ```
 .
@@ -290,13 +328,13 @@ These files are ready for Packer to discover and use.
 dagger call detect-version --source=../path/to/plugin
 
 # Run full build with auto-detected git-source
-dagger call build-and-install \
+dagger call build-artifacts \
   --source=../path/to/plugin \
   --use-version-file \
   export --path=/tmp/output
 
 # Run full build with explicit parameters
-dagger call build-and-install \
+dagger call build-artifacts \
   --source=../path/to/plugin \
   --git-source=github.com/user/plugin \
   --version=1.0.0 \
